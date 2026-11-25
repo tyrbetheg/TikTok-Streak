@@ -1,7 +1,7 @@
 {
-  "message": "API",
-  "useQuotesAPi": true,
-  "totalUsers": 14,
+  "message": "хозяин аккаунта уехал, за него огонек продлевает умни бот",
+  "useQuotesAPi": false,
+  "totalUsers": 3,
   "actionDelayMs": 300,
   "typeDelayMs": 0,
   "afterSendDelayMs": 500,
