@@ -23,16 +23,3 @@ jobs:
         env:
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
         run: node index.js
-
-      - name: Discord Notification
-        if: always()
-        uses: tsickert/discord-webhook@v7.0.0
-        with:
-          webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
-          username: TikTok Streak
-          content: |
-            **TikTok Streak**
-            Status: `${{ job.status }}`
-            Repository: `${{ github.repository }}`
-            Trigger: `${{ github.event_name }}`
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
