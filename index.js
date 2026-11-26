@@ -44,7 +44,7 @@ if (process.env.PUPPETEER_EXECUTABLE_PATH) {
 
 const fetchQuote = async () => {
   try {
-    const res = await fetch("https://dummyjson.com/quotes/random");
+    const res = await fetch("https://dummyjson.com");
     const data = await res.json();
     return `"${data.quote}" — ${data.author}`;
   } catch {
@@ -91,71 +91,69 @@ const main = async () => {
     await page.setViewport({ width: 1280, height: 800 });
     await page.setCookie(...credentials.cookies);
 
-    const url = CONFIG.targetUrl || "https://tiktok.com";
-    if (isDebug) console.log(yellow(`[+] Membuka halaman: ${url}`));
+    const url = "https://tiktok.com";
+    if (isDebug) console.log(yellow(`[+] Открываем страницу: ${url}`));
     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-    if (isDebug) console.log(yellow("[+] Halaman loaded, tunggu UI siap..."));
     await new Promise((r) => setTimeout(r, CONFIG.pageLoadDelayMs || 5000));
+
+    // Проверяем, авторизованы ли мы (не перекинуло ли на страницу входа)
+    const currentUrl = page.url();
+    const pageTitle = await page.title();
+    if (isDebug) console.log(cyan(`[+] Текущий URL: ${currentUrl} | Заголовок: ${pageTitle}`));
+
+    const hasLoginBtn = await page.evaluate(() => {
+      return !!document.querySelector('[data-e2e="top-login-button"], #header-login-button');
+    });
+    if (hasLoginBtn) {
+      throw new Error("TikTok не распознал куки (отображается кнопка Войти). Нужно обновить COOKIES_JSON!");
+    }
+
+    // Если список чатов ещё не открыт, пробуем нажать на иконку Сообщений в левом меню
+    const navClicked = await page.evaluate(() => {
+      const msgBtn = document.querySelector('[data-e2e="nav-messages"]') ||
+                     Array.from(document.querySelectorAll('a, button, div[role="button"]')).find(el =>
+                       /^(Messages|Сообщения)$/i.test(el.textContent?.trim())
+                     );
+      if (msgBtn) {
+        msgBtn.click();
+        return true;
+      }
+      return false;
+    });
+    if (navClicked && isDebug) {
+      console.log(cyan("[+] Нажали на кнопку Сообщения в меню, ждём загрузку чатов..."));
+      await new Promise((r) => setTimeout(r, 3000));
+    }
 
     let success = 0, failed = 0;
 
-    // Проверяем, есть ли iframe (для business-suite), иначе работаем напрямую со страницей (page)
-    let targetContext = page;
-    const iframe = await page.$("iframe[src*='/messages']");
-    if (iframe) {
-      const frame = await iframe.contentFrame();
-      if (frame) {
-        targetContext = frame;
-        if (isDebug) console.log(cyan("[+] Переключились внутрь iframe сообщений"));
-      }
-    } else {
-      if (isDebug) console.log(cyan("[+] Работаем напрямую со страницей сообщений (без iframe)"));
-    }
-
-    // Закрываем всплывающие окна, если есть
-    try {
-      await targetContext.waitForSelector("._TUXModal-wrapper", { visible: true, timeout: 3000 });
-      await targetContext.evaluate(() => {
-        const modal = document.querySelector("._TUXModal-wrapper");
-        if (!modal) return;
-        const rect = modal.getBoundingClientRect();
-        const x = Math.max(1, rect.left - 10);
-        const y = Math.max(1, rect.top - 10);
-        document.elementFromPoint(x, y)?.click();
-      });
-    } catch (e) {}
-
     for (let i = 0; i < CONFIG.totalUsers; i++) {
       try {
-        const userSelector = `div[data-index="${i}"] [data-e2e="dm-new-conversation-item"], [data-e2e="dm-new-conversation-item"]`;
-        await targetContext.waitForSelector(`div[data-index="${i}"]`, { timeout: 5000 });
-
-        const clicked = await targetContext.evaluate((idx) => {
-          const item = document.querySelector(`div[data-index="${idx}"] [data-e2e="dm-new-conversation-item"]`) ||
-                       document.querySelector(`div[data-index="${idx}"]`);
-          if (item) {
-            item.click();
-            return true;
+        // Ищем элементы чатов разными способами (по data-index или по списку диалогов)
+        const chatClicked = await page.evaluate((idx) => {
+          const byIndex = document.querySelector(`div[data-index="${idx}"] [data-e2e="dm-new-conversation-item"]`) ||
+                          document.querySelector(`div[data-index="${idx}"]`);
+          if (byIndex) {
+            byIndex.click();
+            return byIndex.innerText?.split('\n')[0] || `user_${idx}`;
           }
-          return false;
+          const items = document.querySelectorAll('[data-e2e="dm-new-conversation-item"], [class*="DivItemWrapper"], [class*="ConversationItem"]');
+          if (items[idx]) {
+            items[idx].click();
+            return items[idx].innerText?.split('\n')[0] || `user_${idx}`;
+          }
+          return null;
         }, i);
 
-        if (!clicked) throw new Error(`Чат с индексом ${i} не найден`);
+        if (!chatClicked) throw new Error(`Диалог №${i + 1} не найден в списке`);
 
-        const username = await targetContext.evaluate((idx) => {
-          const el = document.querySelector(`div[data-index="${idx}"] [data-e2e="dm-new-conversation-nickname"]`) ||
-                     document.querySelector(`div[data-index="${idx}"] p`);
-          return el?.textContent?.trim() || `user${idx}`;
-        }, i);
+        console.log(yellow(`\n[${i + 1}/${CONFIG.totalUsers}] Отправляем сообщение: ${chatClicked}`));
+        await new Promise((r) => setTimeout(r, 1500));
 
-        console.log(yellow(`\n[${i + 1}/${CONFIG.totalUsers}] Mengirim pesan ke: ${username}`));
-        await new Promise((r) => setTimeout(r, 1000));
-
-        if (isDebug) console.log(yellow("  [~] Mencari editor..."));
-        const editorSelector = 'div.notranslate.public-DraftEditor-content, div[contenteditable="true"][role="textbox"]';
-        await targetContext.waitForSelector(editorSelector, { timeout: 5000 });
-        const editor = await targetContext.$(editorSelector);
-        if (!editor) throw new Error("Editor not found");
+        const editorSelector = 'div.notranslate.public-DraftEditor-content, div[contenteditable="true"][role="textbox"], div[contenteditable="true"]';
+        await page.waitForSelector(editorSelector, { timeout: 5000 });
+        const editor = await page.$(editorSelector);
+        if (!editor) throw new Error("Поле ввода сообщения не найдено");
 
         await editor.click();
         await new Promise((r) => setTimeout(r, CONFIG.afterClickDelayMs || 500));
@@ -165,17 +163,15 @@ const main = async () => {
           const quote = await fetchQuote();
           if (!quote) throw new Error("Gagal fetch quote");
           message = quote;
-          if (isDebug) console.log(cyan(`  [~] Quote: ${quote}`));
         }
 
         await page.keyboard.type(message, { delay: CONFIG.typeDelayMs || 50 });
         await new Promise((r) => setTimeout(r, CONFIG.afterSendDelayMs || 500));
 
-        if (isDebug) console.log(blue("  [~] Mengirim pesan..."));
         await page.keyboard.press("Enter");
         await new Promise((r) => setTimeout(r, CONFIG.afterSendDelayMs || 1000));
 
-        console.log(green(`  [✓] Terkirim!`));
+        console.log(green(`  [✓] Отправлено!`));
         success++;
       } catch (e) {
         console.log(red(`  [✗] Error: ${e.message}`));
@@ -183,7 +179,6 @@ const main = async () => {
       }
 
       if (i < CONFIG.totalUsers - 1) {
-        if (isDebug) console.log(yellow(`  [~] Tunggu ${CONFIG.actionDelayMs} ms...`));
         await new Promise((r) => setTimeout(r, CONFIG.actionDelayMs || 2000));
       }
     }
@@ -191,7 +186,6 @@ const main = async () => {
     console.log(green(`\n[+] SELESAI!`));
     console.log(blue(`[+] Success: ${success}`));
     console.log(red(`[+] Failed: ${failed}\n`));
-    await new Promise((r) => setTimeout(r, CONFIG.finishDelayMs || 2000));
   } catch (e) {
     console.error(red("[!] Fatal error:", e.message));
     process.exit(1);
