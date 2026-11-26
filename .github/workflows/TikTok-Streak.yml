@@ -2,8 +2,8 @@ name: TikTok Streak
 
 on:
   schedule:
-    - cron: "0 21 * * *"
-    - cron: "0 9 * * *"
+    - cron: "15 21 * * *"
+    - cron: "15 9 * * *"
   workflow_dispatch:
 
 jobs:
@@ -15,11 +15,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - run: npm install
 
       - name: Run TikTok Streak
         env:
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
-        run: node index.js
+        run: node index.js --debug
