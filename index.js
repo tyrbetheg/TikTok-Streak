@@ -6,12 +6,11 @@ const moment = require("moment-timezone");
 moment.tz.setDefault("Asia/Jakarta");
 const { bold, red, yellow, blue, magenta, cyan, green } = require("kleur/colors");
 
-
-
 const args = process.argv.slice(2);
 const isDebug = args.includes("--debug");
 const CREDENTIALS_FILE = path.join(__dirname, "cookies.json");
 const CONFIG_FILE = path.join(__dirname, "config.json");
+
 const loadConfig = () => {
   const fromEnv = process.env.CONFIG_JSON;
   if (fromEnv) {
@@ -29,17 +28,20 @@ const loadConfig = () => {
     throw new Error("Invalid config.json");
   }
 };
+
 const CONFIG = loadConfig();
 if (process.env.HEADLESS !== undefined) CONFIG.headless = process.env.HEADLESS === "true";
 if (process.env.TOTAL_USERS !== undefined) CONFIG.totalUsers = Number(process.env.TOTAL_USERS);
 if (process.env.MESSAGE !== undefined) CONFIG.message = process.env.MESSAGE;
+
 const BROWSER_CONFIG = {
-  args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
   headless: CONFIG.headless,
 };
 if (process.env.PUPPETEER_EXECUTABLE_PATH) {
   BROWSER_CONFIG.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
 }
+
 const fetchQuote = async () => {
   try {
     const res = await fetch("https://dummyjson.com/quotes/random");
@@ -50,10 +52,8 @@ const fetchQuote = async () => {
   }
 };
 
-
-
 const main = async () => {
-  const banner = figlet.textSync("TikTok Streak", { font: CONFIG.bannerFont, horizontalLayout: "default", verticalLayout: "default" });
+  const banner = figlet.textSync("TikTok Streak", { font: CONFIG.bannerFont || "Standard", horizontalLayout: "default", verticalLayout: "default" });
   console.clear();
   console.log(bold(cyan(banner)));
   console.log(yellow("\n[+] Made with 🚬 and ☕ by Saturia."));
@@ -61,8 +61,6 @@ const main = async () => {
   else console.log(blue("[+] Message:", CONFIG.message));
   console.log(magenta("[+] Delay:", `${CONFIG.actionDelayMs} ms\n`));
   console.log(yellow(`[+] Mode: ${isDebug ? "Debug" : "Normal"}\n`));
-
-
 
   let credentials;
   if (process.env.COOKIES_JSON) {
@@ -85,30 +83,39 @@ const main = async () => {
     throw new Error("Session not found. Set COOKIES_JSON env var or create cookies.json");
   }
 
-
-
   let browser;
   try {
     browser = await puppeteer.launch(BROWSER_CONFIG);
     const page = await browser.newPage();
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
     await page.setViewport({ width: 1280, height: 800 });
     await page.setCookie(...credentials.cookies);
-    if (isDebug) console.log(yellow("[+] Membuka halaman TikTok messages..."));
-    await page.goto(CONFIG.targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
+
+    const url = CONFIG.targetUrl || "https://tiktok.com";
+    if (isDebug) console.log(yellow(`[+] Membuka halaman: ${url}`));
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
     if (isDebug) console.log(yellow("[+] Halaman loaded, tunggu UI siap..."));
-    await new Promise((r) => setTimeout(r, CONFIG.pageLoadDelayMs));
+    await new Promise((r) => setTimeout(r, CONFIG.pageLoadDelayMs || 5000));
 
+    let success = 0, failed = 0;
 
+    // Проверяем, есть ли iframe (для business-suite), иначе работаем напрямую со страницей (page)
+    let targetContext = page;
+    const iframe = await page.$("iframe[src*='/messages']");
+    if (iframe) {
+      const frame = await iframe.contentFrame();
+      if (frame) {
+        targetContext = frame;
+        if (isDebug) console.log(cyan("[+] Переключились внутрь iframe сообщений"));
+      }
+    } else {
+      if (isDebug) console.log(cyan("[+] Работаем напрямую со страницей сообщений (без iframe)"));
+    }
 
-    let success = 0,
-    failed = 0;
-    const iframe = await page.$("iframe[src*='/messages?allow_label=true&lang=en&scene=business']");
-    if (!iframe) return;
-    const frame = await iframe.contentFrame();
-    if (!frame) return;
+    // Закрываем всплывающие окна, если есть
     try {
-      await frame.waitForSelector("._TUXModal-wrapper", { visible: true, timeout: 3000});
-      await frame.evaluate(() => {
+      await targetContext.waitForSelector("._TUXModal-wrapper", { visible: true, timeout: 3000 });
+      await targetContext.evaluate(() => {
         const modal = document.querySelector("._TUXModal-wrapper");
         if (!modal) return;
         const rect = modal.getBoundingClientRect();
@@ -116,71 +123,81 @@ const main = async () => {
         const y = Math.max(1, rect.top - 10);
         document.elementFromPoint(x, y)?.click();
       });
-    } catch (e) {
-    }
-
-
+    } catch (e) {}
 
     for (let i = 0; i < CONFIG.totalUsers; i++) {
       try {
-        const userSelector = `div[data-index="${i}"] [data-e2e="dm-new-conversation-item"]`;
-        await frame.waitForSelector(userSelector, { timeout: 3000 });
-        await frame.click(userSelector);
-        const nicknameSelector = `div[data-index="${i}"] [data-e2e="dm-new-conversation-nickname"]`;
-        const username = await frame.evaluate((sel) => {
-          return document.querySelector(sel)?.textContent || `user${i}`;
-        }, nicknameSelector);
+        const userSelector = `div[data-index="${i}"] [data-e2e="dm-new-conversation-item"], [data-e2e="dm-new-conversation-item"]`;
+        await targetContext.waitForSelector(`div[data-index="${i}"]`, { timeout: 5000 });
+
+        const clicked = await targetContext.evaluate((idx) => {
+          const item = document.querySelector(`div[data-index="${idx}"] [data-e2e="dm-new-conversation-item"]`) ||
+                       document.querySelector(`div[data-index="${idx}"]`);
+          if (item) {
+            item.click();
+            return true;
+          }
+          return false;
+        }, i);
+
+        if (!clicked) throw new Error(`Чат с индексом ${i} не найден`);
+
+        const username = await targetContext.evaluate((idx) => {
+          const el = document.querySelector(`div[data-index="${idx}"] [data-e2e="dm-new-conversation-nickname"]`) ||
+                     document.querySelector(`div[data-index="${idx}"] p`);
+          return el?.textContent?.trim() || `user${idx}`;
+        }, i);
+
         console.log(yellow(`\n[${i + 1}/${CONFIG.totalUsers}] Mengirim pesan ke: ${username}`));
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 1000));
+
         if (isDebug) console.log(yellow("  [~] Mencari editor..."));
-        await frame.waitForSelector("div.notranslate.public-DraftEditor-content", { timeout: 3000 });
-        const editor = await frame.$("div.notranslate.public-DraftEditor-content");
+        const editorSelector = 'div.notranslate.public-DraftEditor-content, div[contenteditable="true"][role="textbox"]';
+        await targetContext.waitForSelector(editorSelector, { timeout: 5000 });
+        const editor = await targetContext.$(editorSelector);
         if (!editor) throw new Error("Editor not found");
+
         await editor.click();
-        await new Promise((r) => setTimeout(r, CONFIG.afterClickDelayMs));
-        let message = CONFIG.message;
+        await new Promise((r) => setTimeout(r, CONFIG.afterClickDelayMs || 500));
+
+        let message = CONFIG.message || "🔥";
         if (CONFIG.useQuotesAPi) {
           const quote = await fetchQuote();
           if (!quote) throw new Error("Gagal fetch quote");
           message = quote;
           if (isDebug) console.log(cyan(`  [~] Quote: ${quote}`));
         }
-        await page.keyboard.type(message, { delay: CONFIG.typeDelayMs });
-        await new Promise((r) => setTimeout(r, CONFIG.afterSendDelayMs));
-        if (isDebug) console.log(blue("  [~] Mengirim dengan Ctrl+Enter..."));
-        await page.keyboard.down("Control");
+
+        await page.keyboard.type(message, { delay: CONFIG.typeDelayMs || 50 });
+        await new Promise((r) => setTimeout(r, CONFIG.afterSendDelayMs || 500));
+
+        if (isDebug) console.log(blue("  [~] Mengirim pesan..."));
         await page.keyboard.press("Enter");
-        await page.keyboard.up("Control");
-        await new Promise((r) => setTimeout(r, CONFIG.afterSendDelayMs));
+        await new Promise((r) => setTimeout(r, CONFIG.afterSendDelayMs || 1000));
+
         console.log(green(`  [✓] Terkirim!`));
         success++;
       } catch (e) {
-        if (isDebug) console.log(red(`  [✗] Error: ${e.message}`));
+        console.log(red(`  [✗] Error: ${e.message}`));
         failed++;
       }
 
-
-
       if (i < CONFIG.totalUsers - 1) {
         if (isDebug) console.log(yellow(`  [~] Tunggu ${CONFIG.actionDelayMs} ms...`));
-        await new Promise((r) => setTimeout(r, CONFIG.actionDelayMs));
+        await new Promise((r) => setTimeout(r, CONFIG.actionDelayMs || 2000));
       }
     }
-
-
 
     console.log(green(`\n[+] SELESAI!`));
     console.log(blue(`[+] Success: ${success}`));
     console.log(red(`[+] Failed: ${failed}\n`));
-    await new Promise((r) => setTimeout(r, CONFIG.finishDelayMs));
+    await new Promise((r) => setTimeout(r, CONFIG.finishDelayMs || 2000));
   } catch (e) {
-    if (isDebug) console.error(red("[!] Fatal error:", e.message));
+    console.error(red("[!] Fatal error:", e.message));
     process.exit(1);
   } finally {
     if (browser) await browser.close();
   }
 };
-
-
 
 main();
